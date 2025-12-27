@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>馬賽數位觀課儀表板 V1.3</title>
+    <title>馬賽數位觀課儀表板 V1.4</title>
     
     <!-- React & ReactDOM -->
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
@@ -109,7 +109,7 @@
         const { useState, useEffect, useRef, useMemo } = React;
 
         // --- Constants & Config ---
-        const APP_VERSION = "V1.3";
+        const APP_VERSION = "V1.4";
         const SUBJECTS = ["國語文", "英語文", "數學", "社會", "自然", "綜合", "本土語", "藝文", "資訊"];
         
         const MODES_CONFIG = [
@@ -355,7 +355,125 @@
                 return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
             };
 
-            // -- Export Logic --
+            // -- Export Logic / Analysis --
+            
+            const generateIndicatorText = () => {
+                const combinedLogs = logs.map(l => l.detail).join(" ");
+                const hasTerm = (term) => combinedLogs.includes(term);
+                
+                // Helper to check conditions
+                // modes: lecture, discuss, practice, digital
+                // actions: encourage, correct, openQ, closeQ, walk
+                
+                const facts = [];
+
+                // A-2-1 引發動機 (Encourage, Lecture, Note keywords)
+                if (actionCounts.encourage > 0 || hasTerm("動機") || hasTerm("生活")) {
+                    facts.push("A-2-1: 運用鼓勵或連結生活經驗，引發學習動機。");
+                } else if (modeStates.lecture.duration > 30) {
+                     facts.push("A-2-1: 課程開始進行說明，嘗試引起注意。");
+                } else {
+                    facts.push("A-2-1: 未觀察到");
+                }
+
+                // A-2-2 清晰呈現 (Lecture, Digital)
+                if (modeStates.digital.duration > 60) {
+                    facts.push("A-2-2: 運用數位工具清晰呈現教材與概念。");
+                } else if (modeStates.lecture.duration > 60) {
+                    facts.push("A-2-2: 口語說明清晰，協助學生掌握重點。");
+                } else {
+                    facts.push("A-2-2: 未觀察到");
+                }
+
+                // A-2-3 練習活動 (Practice, Discuss)
+                if (modeStates.practice.duration > 60) {
+                    facts.push("A-2-3: 安排實作練習，協助學生熟練內容。");
+                } else if (modeStates.discuss.duration > 60) {
+                    facts.push("A-2-3: 透過討論活動，加深對內容的理解。");
+                } else {
+                    facts.push("A-2-3: 未觀察到");
+                }
+
+                // A-2-4 歸納總結 (Hard to detect, infer from end of class or Lecture)
+                if (hasTerm("總結") || hasTerm("歸納")) {
+                    facts.push("A-2-4: 活動後適時歸納，統整學習重點。");
+                } else {
+                    facts.push("A-2-4: 未觀察到 (或未記錄到歸納環節)");
+                }
+
+                // A-3-1 教學策略 (Discuss, OpenQ, Practice)
+                if (modeStates.discuss.duration > 0 || actionCounts.openQ > 0) {
+                    facts.push("A-3-1: 運用提問或討論策略，引導思考實作。");
+                } else {
+                    facts.push("A-3-1: 未觀察到");
+                }
+
+                // A-3-2 學習策略指導 (Inferred from Correct or Practice)
+                if (modeStates.practice.duration > 0 && actionCounts.walk > 0) {
+                    facts.push("A-3-2: 在活動中指導學習策略與方法。");
+                } else {
+                    facts.push("A-3-2: 未觀察到");
+                }
+
+                // A-3-3 溝通技巧 (Walk, OpenQ, CloseQ)
+                if (actionCounts.walk > 0 || (actionCounts.openQ + actionCounts.closeQ) > 0) {
+                    facts.push("A-3-3: 運用巡視與口語溝通技巧幫助學習。");
+                } else {
+                    facts.push("A-3-3: 未觀察到");
+                }
+
+                // A-4-1 多元評量 (CloseQ, Practice)
+                if (actionCounts.closeQ > 0 || modeStates.practice.duration > 0) {
+                    facts.push("A-4-1: 運用提問或實作觀察評估學習成效。");
+                } else {
+                    facts.push("A-4-1: 未觀察到");
+                }
+
+                // A-4-2 回饋 (Correct, Encourage)
+                if (actionCounts.correct > 0 || actionCounts.encourage > 0) {
+                    facts.push("A-4-2: 依據學生表現提供適切回饋與指導。");
+                } else {
+                    facts.push("A-4-2: 未觀察到");
+                }
+
+                // A-4-3 調整教學 (Inferred from Walk + Correct)
+                if (actionCounts.walk > 2 && actionCounts.correct > 0) {
+                    facts.push("A-4-3: 根據巡視結果即時調整指導內容。");
+                } else {
+                    facts.push("A-4-3: 未觀察到");
+                }
+
+                // B-1-1 課堂規範 (Correct)
+                if (actionCounts.correct > 0 || hasTerm("常規") || hasTerm("秩序")) {
+                    facts.push("B-1-1: 建立並維持有助學習的課堂規範。");
+                } else {
+                    facts.push("B-1-1: 未觀察到");
+                }
+
+                // B-1-2 回應行為 (Encourage, Correct)
+                if (actionCounts.encourage > 0) {
+                    facts.push("B-1-2: 給予正向鼓勵，引導良好行為表現。");
+                } else {
+                    facts.push("B-1-2: 未觀察到");
+                }
+
+                // B-2-1 環境設施 (Walk - assumes space allows walking)
+                if (actionCounts.walk > 0) {
+                    facts.push("B-2-1: 善用教學空間，巡視動線流暢。");
+                } else {
+                    facts.push("B-2-1: 未觀察到");
+                }
+
+                // B-2-2 氣氛 (Encourage, Discuss)
+                if (actionCounts.encourage > 2 || modeStates.discuss.duration > 0) {
+                    facts.push("B-2-2: 營造溫暖氣氛，促進師生合作互動。");
+                } else {
+                    facts.push("B-2-2: 未觀察到");
+                }
+
+                return facts.join("\n");
+            };
+
             const generateReport = () => {
                 let report = `馬賽數位觀課儀表板 ${APP_VERSION} - 觀課紀錄\n`;
                 report += `日期: ${new Date().toLocaleDateString()}\n`;
@@ -372,7 +490,10 @@
                     report += `${a.label}: ${actionCounts[a.id]} 次\n`;
                 });
 
-                report += `\n[詳細紀錄流]\n`;
+                report += `\n[指標檢核與事實摘要] (依據數據自動生成)\n`;
+                report += generateIndicatorText();
+
+                report += `\n\n[詳細紀錄流]\n`;
                 logs.forEach(l => {
                     report += `[${l.time}] ${l.type.toUpperCase()} - ${l.label}: ${l.detail}\n`;
                 });
@@ -405,7 +526,7 @@
                     <header className="flex-none h-16 glass-header flex items-center justify-between px-4 z-20">
                         <div className="flex items-center gap-4">
                             <div className="text-amber-400 font-bold text-lg tracking-widest border border-amber-500/30 px-2 py-1">
-                                MAASAI <span className="text-xs align-top opacity-70">{APP_VERSION}</span>
+                                馬賽數位觀課儀表板 <span className="text-xs align-top opacity-70">{APP_VERSION}</span>
                             </div>
                             <select 
                                 className="bg-slate-900 border border-slate-700 text-amber-50 rounded px-2 py-1 focus:ring-1 focus:ring-amber-500 outline-none"

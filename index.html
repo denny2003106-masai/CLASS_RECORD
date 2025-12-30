@@ -194,35 +194,56 @@
             </button>
         );
 
+        // --- Custom Hook for LocalStorage ---
+        function useStickyState(defaultValue, key) {
+            const [value, setValue] = React.useState(() => {
+                const stickyValue = window.localStorage.getItem(key);
+                return stickyValue !== null ? JSON.parse(stickyValue) : defaultValue;
+            });
+            React.useEffect(() => {
+                // CRITICAL FIX: If global reset flag is set, DO NOT save anything.
+                // This prevents race conditions where React state updates (e.g. from timers) 
+                // overwrite the cleared localStorage before reload completes.
+                if (window.__isResetting) return; 
+                
+                window.localStorage.setItem(key, JSON.stringify(value));
+            }, [key, value]);
+            return [value, setValue];
+        }
+
         // --- Main App Component ---
         const App = () => {
-            // -- State --
-            const [isActive, setIsActive] = useState(false);
-            const [selectedSubject, setSelectedSubject] = useState(SUBJECTS[0]);
+            // -- State (Persistent) --
+            const [isActive, setIsActive] = useStickyState(false, 'maasai_active');
+            const [selectedSubject, setSelectedSubject] = useStickyState(SUBJECTS[0], 'maasai_subject');
+            const [startTime, setStartTime] = useStickyState(null, 'maasai_startTime');
+            
+            // Log Data (Persistent)
+            const [logs, setLogs] = useStickyState([], 'maasai_logs');
+            
+            // Mode State (Persistent)
+            const [modeStates, setModeStates] = useStickyState(
+                MODES_CONFIG.reduce((acc, mode) => ({ ...acc, [mode.id]: { active: false, duration: 0 } }), {}),
+                'maasai_modeStates'
+            );
+
+            // Action Counts (Persistent)
+            const [actionCounts, setActionCounts] = useStickyState(
+                ACTIONS_CONFIG.reduce((acc, action) => ({ ...acc, [action.id]: 0 }), {}),
+                'maasai_actionCounts'
+            );
+
+            // Engagement (Persistent)
+            const [engagement, setEngagement] = useStickyState('mid', 'maasai_engagement');
+            
+            // -- State (Transient/UI) --
             const [currentTime, setCurrentTime] = useState(new Date());
-            const [startTime, setStartTime] = useState(null);
-            
-            // Log Data
-            const [logs, setLogs] = useState([]);
-            
-            // Mode State: { modeId: { active: boolean, duration: seconds } }
-            const [modeStates, setModeStates] = useState(
-                MODES_CONFIG.reduce((acc, mode) => ({ ...acc, [mode.id]: { active: false, duration: 0 } }), {})
-            );
-
-            // Action Counts: { actionId: count }
-            const [actionCounts, setActionCounts] = useState(
-                ACTIONS_CONFIG.reduce((acc, action) => ({ ...acc, [action.id]: 0 }), {})
-            );
-
-            // Engagement & Footer
-            const [engagement, setEngagement] = useState('mid'); // high, mid, low
             const [lastInteraction, setLastInteraction] = useState(Date.now());
             const [showEngagementAlert, setShowEngagementAlert] = useState(false);
             const [qualitativeText, setQualitativeText] = useState("");
-            
-            // Modal
             const [showReport, setShowReport] = useState(false);
+            // NEW: Store the generated report to display after data reset
+            const [frozenReport, setFrozenReport] = useState("");
 
             // Refs for scrolling
             const logEndRef = useRef(null);
@@ -260,7 +281,7 @@
                     }, 1000);
                 }
                 return () => clearInterval(interval);
-            }, [isActive, lastInteraction]);
+            }, [isActive, lastInteraction, setModeStates]); // Added setModeStates dependency
 
             // Auto-scroll logs
             useEffect(() => {
@@ -282,21 +303,40 @@
                     if (!startTime) setStartTime(now);
                     addLog('system', '開始觀課', `科目: ${selectedSubject}`);
                 } else {
-                    // Stop
-                    setIsActive(false);
-                    // Deactivate all modes
-                    setModeStates(prev => {
-                        const next = { ...prev };
-                        Object.keys(next).forEach(k => next[k].active = false);
-                        return next;
-                    });
-                    addLog('system', '暫停/結束', '停止計時');
+                    // STOP & AUTO-RESET LOGIC
+                    
+                    // 1. Generate Report based on CURRENT data immediately
+                    const finalReportStr = generateReport();
+                    setFrozenReport(finalReportStr);
                     setShowReport(true);
+
+                    // 2. Perform "Soft Reset" immediately after stopping
+                    // This clears the dashboard for the next session
+                    setIsActive(false);
+                    setStartTime(null);
+                    setLogs([]);
+                    
+                    // Reset all counters to defaults
+                    setModeStates(MODES_CONFIG.reduce((acc, mode) => ({ ...acc, [mode.id]: { active: false, duration: 0 } }), {}));
+                    setActionCounts(ACTIONS_CONFIG.reduce((acc, action) => ({ ...acc, [action.id]: 0 }), {}));
+                    setEngagement('mid');
+                }
+            };
+
+            const handleManualReset = () => {
+                if(confirm("確定要強制清除並重新載入頁面？")) {
+                    window.__isResetting = true;
+                    const keysToRemove = [
+                        'maasai_active', 'maasai_subject', 'maasai_startTime', 
+                        'maasai_logs', 'maasai_modeStates', 'maasai_actionCounts', 'maasai_engagement'
+                    ];
+                    keysToRemove.forEach(k => window.localStorage.removeItem(k));
+                    setTimeout(() => window.location.reload(), 50);
                 }
             };
 
             const toggleMode = (modeId) => {
-                if (!isActive) return; // Prevent interaction if not started (or allow but warn? implementing disabled prop instead)
+                if (!isActive) return; // Prevent interaction if not started
                 
                 setLastInteraction(Date.now());
                 setShowEngagementAlert(false);
@@ -361,13 +401,10 @@
                 const combinedLogs = logs.map(l => l.detail).join(" ");
                 const hasTerm = (term) => combinedLogs.includes(term);
                 
-                // Helper to check conditions
-                // modes: lecture, discuss, practice, digital
-                // actions: encourage, correct, openQ, closeQ, walk
-                
                 const facts = [];
-
-                // A-2-1 引發動機 (Encourage, Lecture, Note keywords)
+                // [Analysis Logic]
+                
+                // A-2-1
                 if (actionCounts.encourage > 0 || hasTerm("動機") || hasTerm("生活")) {
                     facts.push("A-2-1: 運用鼓勵或連結生活經驗，引發學習動機。");
                 } else if (modeStates.lecture.duration > 30) {
@@ -376,7 +413,7 @@
                     facts.push("A-2-1: 未觀察到");
                 }
 
-                // A-2-2 清晰呈現 (Lecture, Digital)
+                // A-2-2
                 if (modeStates.digital.duration > 60) {
                     facts.push("A-2-2: 運用數位工具清晰呈現教材與概念。");
                 } else if (modeStates.lecture.duration > 60) {
@@ -385,7 +422,7 @@
                     facts.push("A-2-2: 未觀察到");
                 }
 
-                // A-2-3 練習活動 (Practice, Discuss)
+                // A-2-3
                 if (modeStates.practice.duration > 60) {
                     facts.push("A-2-3: 安排實作練習，協助學生熟練內容。");
                 } else if (modeStates.discuss.duration > 60) {
@@ -394,83 +431,83 @@
                     facts.push("A-2-3: 未觀察到");
                 }
 
-                // A-2-4 歸納總結 (Hard to detect, infer from end of class or Lecture)
+                // A-2-4
                 if (hasTerm("總結") || hasTerm("歸納")) {
                     facts.push("A-2-4: 活動後適時歸納，統整學習重點。");
                 } else {
                     facts.push("A-2-4: 未觀察到 (或未記錄到歸納環節)");
                 }
 
-                // A-3-1 教學策略 (Discuss, OpenQ, Practice)
+                // A-3-1
                 if (modeStates.discuss.duration > 0 || actionCounts.openQ > 0) {
                     facts.push("A-3-1: 運用提問或討論策略，引導思考實作。");
                 } else {
                     facts.push("A-3-1: 未觀察到");
                 }
 
-                // A-3-2 學習策略指導 (Inferred from Correct or Practice)
+                // A-3-2
                 if (modeStates.practice.duration > 0 && actionCounts.walk > 0) {
                     facts.push("A-3-2: 在活動中指導學習策略與方法。");
                 } else {
                     facts.push("A-3-2: 未觀察到");
                 }
 
-                // A-3-3 溝通技巧 (Walk, OpenQ, CloseQ)
+                // A-3-3
                 if (actionCounts.walk > 0 || (actionCounts.openQ + actionCounts.closeQ) > 0) {
                     facts.push("A-3-3: 運用巡視與口語溝通技巧幫助學習。");
                 } else {
                     facts.push("A-3-3: 未觀察到");
                 }
 
-                // A-4-1 多元評量 (CloseQ, Practice)
+                // A-4-1
                 if (actionCounts.closeQ > 0 || modeStates.practice.duration > 0) {
                     facts.push("A-4-1: 運用提問或實作觀察評估學習成效。");
                 } else {
                     facts.push("A-4-1: 未觀察到");
                 }
 
-                // A-4-2 回饋 (Correct, Encourage)
+                // A-4-2
                 if (actionCounts.correct > 0 || actionCounts.encourage > 0) {
                     facts.push("A-4-2: 依據學生表現提供適切回饋與指導。");
                 } else {
                     facts.push("A-4-2: 未觀察到");
                 }
 
-                // A-4-3 調整教學 (Inferred from Walk + Correct)
+                // A-4-3
                 if (actionCounts.walk > 2 && actionCounts.correct > 0) {
                     facts.push("A-4-3: 根據巡視結果即時調整指導內容。");
                 } else {
                     facts.push("A-4-3: 未觀察到");
                 }
 
-                // B-1-1 課堂規範 (Correct)
+                // B-1-1
                 if (actionCounts.correct > 0 || hasTerm("常規") || hasTerm("秩序")) {
                     facts.push("B-1-1: 建立並維持有助學習的課堂規範。");
                 } else {
                     facts.push("B-1-1: 未觀察到");
                 }
 
-                // B-1-2 回應行為 (Encourage, Correct)
+                // B-1-2
                 if (actionCounts.encourage > 0) {
                     facts.push("B-1-2: 給予正向鼓勵，引導良好行為表現。");
                 } else {
                     facts.push("B-1-2: 未觀察到");
                 }
 
-                // B-2-1 環境設施 (Walk - assumes space allows walking)
+                // B-2-1
                 if (actionCounts.walk > 0) {
                     facts.push("B-2-1: 善用教學空間，巡視動線流暢。");
                 } else {
                     facts.push("B-2-1: 未觀察到");
                 }
 
-                // B-2-2 氣氛 (Encourage, Discuss)
+                // B-2-2
                 if (actionCounts.encourage > 2 || modeStates.discuss.duration > 0) {
                     facts.push("B-2-2: 營造溫暖氣氛，促進師生合作互動。");
                 } else {
                     facts.push("B-2-2: 未觀察到");
                 }
-
+                
                 return facts.join("\n");
             };
 
@@ -478,7 +515,8 @@
                 let report = `馬賽數位觀課儀表板 ${APP_VERSION} - 觀課紀錄\n`;
                 report += `日期: ${new Date().toLocaleDateString()}\n`;
                 report += `科目: ${selectedSubject}\n`;
-                report += `總時間: ${startTime ? new Date().toLocaleTimeString() : '-'} - ${new Date().toLocaleTimeString()}\n\n`;
+                const startStr = startTime ? new Date(startTime).toLocaleTimeString() : '-';
+                report += `總時間: ${startStr} - ${new Date().toLocaleTimeString()}\n\n`;
                 
                 report += `[教學模式統計]\n`;
                 MODES_CONFIG.forEach(m => {
@@ -502,13 +540,50 @@
             };
 
             const copyToClipboard = () => {
-                const text = generateReport();
-                navigator.clipboard.writeText(text).then(() => alert("已複製到剪貼簿"));
+                // Use the frozen report instead of regenerating from empty state
+                const text = frozenReport;
+                
+                const legacyCopy = (text) => {
+                    const textArea = document.createElement("textarea");
+                    textArea.value = text;
+                    textArea.style.position = "fixed";
+                    textArea.style.left = "-9999px";
+                    textArea.style.top = "0";
+                    textArea.setAttribute('readonly', '');
+                    
+                    document.body.appendChild(textArea);
+                    
+                    const range = document.createRange();
+                    range.selectNodeContents(textArea);
+                    const selection = window.getSelection();
+                    selection.removeAllRanges();
+                    selection.addRange(range);
+                    textArea.setSelectionRange(0, 999999);
+                    
+                    try {
+                        const successful = document.execCommand('copy');
+                        if (successful) alert("已複製到剪貼簿");
+                        else alert("複製失敗，請手動選取文字");
+                    } catch (err) {
+                        alert("複製失敗，請手動選取文字");
+                    }
+                    
+                    document.body.removeChild(textArea);
+                };
+
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(text)
+                        .then(() => alert("已複製到剪貼簿"))
+                        .catch(err => {
+                            legacyCopy(text);
+                        });
+                } else {
+                    legacyCopy(text);
+                }
             };
 
             const downloadTxt = () => {
-                const text = generateReport();
-                // Add BOM for Excel/Windows compatibility
+                const text = frozenReport;
                 const blob = new Blob(["\ufeff" + text], { type: 'text/plain;charset=utf-8' });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');
@@ -664,10 +739,10 @@
                     `}>
                         <div className="max-w-7xl mx-auto flex flex-col gap-2">
                             
-                            {/* Top Row: Engagement & Send */}
-                            <div className="flex items-center gap-4">
-                                {/* Engagement Slider */}
-                                <div className="flex items-center gap-2 bg-slate-900/80 p-1.5 rounded-full border border-slate-700">
+                            {/* Top Row: Engagement & Send - CHANGED LAYOUT */}
+                            <div className="flex flex-col md:flex-row items-stretch md:items-center gap-2 md:gap-4">
+                                {/* Engagement Slider - Centered on mobile or full width */}
+                                <div className="flex items-center justify-between md:justify-start gap-2 bg-slate-900/80 p-1.5 rounded-full border border-slate-700">
                                     <span className="text-xs text-slate-400 px-2 font-bold">專注度</span>
                                     {['high', 'mid', 'low'].map((level) => {
                                         const colors = {
@@ -705,13 +780,13 @@
                                         value={qualitativeText}
                                         onChange={(e) => setQualitativeText(e.target.value)}
                                         placeholder="輸入質性觀察紀錄..."
-                                        className="flex-1 bg-slate-800/50 border border-slate-600 text-slate-100 rounded px-3 focus:outline-none focus:border-amber-500 transition-colors"
+                                        className="flex-1 bg-slate-800/50 border border-slate-600 text-slate-100 rounded px-3 focus:outline-none focus:border-amber-500 transition-colors min-w-0"
                                         disabled={!isActive}
                                     />
                                     <button 
                                         onClick={submitTextLog}
                                         disabled={!isActive}
-                                        className="bg-slate-700 hover:bg-amber-600 text-white px-4 py-1 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                        className="bg-slate-700 hover:bg-amber-600 text-white px-4 py-1 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
                                     >
                                         發送
                                     </button>
@@ -743,21 +818,30 @@
                                     <button onClick={() => setShowReport(false)} className="text-slate-400 hover:text-white">✕</button>
                                 </div>
                                 <div className="p-6 overflow-y-auto font-mono text-sm text-slate-300 bg-slate-950/50 m-4 rounded border border-slate-800 whitespace-pre-wrap">
-                                    {generateReport()}
+                                    {frozenReport /* Show the frozen report, as the live data is already reset */}
                                 </div>
-                                <div className="p-4 border-t border-slate-700 bg-slate-800/30 rounded-b-lg flex justify-end gap-4">
-                                    <button 
-                                        onClick={copyToClipboard}
-                                        className="px-4 py-2 bg-slate-700 text-white rounded hover:bg-slate-600 transition-colors border border-slate-600"
+                                <div className="p-4 border-t border-slate-700 bg-slate-800/30 rounded-b-lg flex justify-between items-center gap-4">
+                                     <button 
+                                        onClick={handleManualReset}
+                                        className="px-4 py-2 bg-red-900/30 text-red-200 rounded hover:bg-red-800/50 transition-colors border border-red-800/50 text-xs opacity-50 hover:opacity-100"
+                                        title="強制刷新頁面"
                                     >
-                                        複製紀錄
+                                        強制重置
                                     </button>
-                                    <button 
-                                        onClick={downloadTxt}
-                                        className="px-4 py-2 bg-amber-600 text-white rounded hover:bg-amber-500 transition-colors shadow-lg shadow-amber-900/20"
-                                    >
-                                        下載 .TXT
-                                    </button>
+                                    <div className="flex gap-4">
+                                        <button 
+                                            onClick={copyToClipboard}
+                                            className="px-4 py-2 bg-slate-700 text-white rounded hover:bg-slate-600 transition-colors border border-slate-600"
+                                        >
+                                            複製紀錄
+                                        </button>
+                                        <button 
+                                            onClick={downloadTxt}
+                                            className="px-4 py-2 bg-amber-600 text-white rounded hover:bg-amber-500 transition-colors shadow-lg shadow-amber-900/20"
+                                        >
+                                            下載 .TXT
+                                        </button>
+                                    </div>
                                 </div>
                             </div>
                         </div>
